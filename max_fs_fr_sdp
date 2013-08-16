@@ -1,0 +1,538 @@
+# HG changeset patch
+# Parent 049f15976d63c429c595972b2d47b20c1211c19a
+# User Shian-Yow Wu <swu@mozilla.com>
+Part 1: SDP parsing/building for max-fs and max-fr parameters.
+
+diff --git a/media/webrtc/signaling/src/sipcc/core/gsm/gsm_sdp.c b/media/webrtc/signaling/src/sipcc/core/gsm/gsm_sdp.c
+--- a/media/webrtc/signaling/src/sipcc/core/gsm/gsm_sdp.c
++++ b/media/webrtc/signaling/src/sipcc/core/gsm/gsm_sdp.c
+@@ -1135,16 +1135,18 @@ gsmsdp_set_2543_hold_sdp (fsmdef_dcb_t *
+  *
+  */
+ static void
+ gsmsdp_set_video_media_attributes (uint32_t media_type, void *cc_sdp_p, uint16_t level,
+                              uint16_t payload_number)
+ {
+     uint16_t a_inst;
+     void *sdp_p = ((cc_sdp_t*)cc_sdp_p)->src_sdp;
++    int max_fs = 0;
++    int max_fr = 0;
+ 
+     switch (media_type) {
+         case RTP_H263:
+         case RTP_H264_P0:
+         case RTP_H264_P1:
+         case RTP_VP8:
+         /*
+          * add a=rtpmap line
+@@ -1171,16 +1173,39 @@ gsmsdp_set_video_media_attributes (uint3
+             (void) sdp_attr_set_rtpmap_clockrate(sdp_p, level, 0, a_inst,
+                                              RTPMAP_VIDEO_CLOCKRATE);
+             break;
+         case RTP_VP8:
+             (void) sdp_attr_set_rtpmap_encname(sdp_p, level, 0, a_inst,
+                                                SIPSDP_ATTR_ENCNAME_VP8);
+             (void) sdp_attr_set_rtpmap_clockrate(sdp_p, level, 0, a_inst,
+                                              RTPMAP_VIDEO_CLOCKRATE);
++
++            /* TODO: Get max_fs & max_fr from device configuration (Bug 881935) */
++            if (max_fs || max_fr) {
++                if (sdp_add_new_attr(sdp_p, level, 0, SDP_ATTR_FMTP, &a_inst)
++                    != SDP_SUCCESS) {
++                    GSM_ERR_MSG("Failed to add attribute");
++                    return;
++                }
++
++                (void) sdp_attr_set_fmtp_payload_type(sdp_p, level, 0, a_inst,
++                                                      payload_number);
++
++                if (max_fs) {
++                    (void) sdp_attr_set_fmtp_max_fs(sdp_p, level, 0, a_inst,
++                                                    max_fs);
++                }
++
++                if (max_fr) {
++                    (void) sdp_attr_set_fmtp_max_fr(sdp_p, level, 0, a_inst,
++                                                    max_fr);
++                }
++            }
++
+             break;
+         }
+     GSM_DEBUG("gsmsdp_set_video_media_attributes- populate attribs %d", payload_number );
+ 
+         vcmPopulateAttribs(cc_sdp_p, level, media_type, payload_number, FALSE);
+ 
+         break;
+ 
+diff --git a/media/webrtc/signaling/src/sipcc/core/sdp/sdp.h b/media/webrtc/signaling/src/sipcc/core/sdp/sdp.h
+--- a/media/webrtc/signaling/src/sipcc/core/sdp/sdp.h
++++ b/media/webrtc/signaling/src/sipcc/core/sdp/sdp.h
+@@ -402,16 +402,17 @@ typedef enum {
+     SDP_MAX_AVERAGE_BIT_RATE,
+     SDP_USED_TX,
+     SDP_STEREO,
+     SDP_USE_IN_BAND_FEC,
+     SDP_MAX_CODED_AUDIO_BW,
+     SDP_CBR,
+     SDP_STREAMS,
+     SDP_PROTOCOL,
++    SDP_MAX_FR,
+     SDP_MAX_FMTP_PARAM,
+     SDP_FMTP_PARAM_UNKNOWN
+ } sdp_fmtp_codec_param_e;
+ 
+ /* Fmtp attribute parameters values for
+    fmtp attribute parameters which convey codec
+    information */
+ 
+@@ -718,16 +719,17 @@ typedef struct sdp_fmtp {
+     u16                       level_asymmetry_allowed;
+     u16                       interleaving_depth;
+     u32                       deint_buf_req;
+     u32                       max_don_diff;
+     u32                       init_buf_time;
+ 
+     u32                       max_mbps;
+     u32                       max_fs;
++    u32                       max_fr;
+     u32                       max_cpb;
+     u32                       max_dpb;
+     u32                       max_br;
+     tinybool                  redundant_pic_cap;
+     u32                       deint_buf_cap;
+     u32                       max_rcmd_nalu_size;
+     u16                       parameter_add;
+ 
+@@ -1546,16 +1548,22 @@ extern sdp_result_e sdp_attr_set_fmtp_ma
+ 						   u32 max_mbps);
+ 
+ extern sdp_result_e sdp_attr_set_fmtp_max_fs (void *sdp_ptr,
+ 					      u16 level,
+ 				              u8 cap_num,
+ 				              u16 inst_num,
+ 					      u32 max_fs);
+ 
++extern sdp_result_e sdp_attr_set_fmtp_max_fr (void *sdp_ptr,
++                                              u16 level,
++                                              u8 cap_num,
++                                              u16 inst_num,
++                                              u32 max_fr);
++
+ extern sdp_result_e sdp_attr_set_fmtp_max_cpb (void *sdp_ptr,
+ 					      u16 level,
+ 				              u8 cap_num,
+ 				              u16 inst_num,
+ 					      u32 max_cpb);
+ 
+ extern sdp_result_e sdp_attr_set_fmtp_max_dpb (void *sdp_ptr,
+ 					      u16 level,
+@@ -1715,16 +1723,18 @@ extern sdp_result_e sdp_attr_get_fmtp_ma
+ 						    u16 level, u8 cap_num,
+ 						    u16 inst_num, u32 *val);
+ 
+ 
+ extern sdp_result_e sdp_attr_get_fmtp_max_mbps (void *sdp_ptr, u16 level,
+                                          u8 cap_num, u16 inst_num, u32 *val);
+ extern sdp_result_e sdp_attr_get_fmtp_max_fs (void *sdp_ptr, u16 level,
+                                        u8 cap_num, u16 inst_num, u32 *val);
++extern sdp_result_e sdp_attr_get_fmtp_max_fr (void *sdp_ptr, u16 level,
++                                       u8 cap_num, u16 inst_num, u32 *val);
+ extern sdp_result_e sdp_attr_get_fmtp_max_cpb (void *sdp_ptr, u16 level,
+                                         u8 cap_num, u16 inst_num, u32 *val);
+ extern sdp_result_e sdp_attr_get_fmtp_max_dpb (void *sdp_ptr, u16 level,
+                                         u8 cap_num, u16 inst_num, u32 *val);
+ extern sdp_result_e sdp_attr_get_fmtp_max_br (void *sdp_ptr, u16 level,
+                                        u8 cap_num, u16 inst_num, u32 *val);
+ extern tinybool sdp_attr_fmtp_is_redundant_pic_cap (void *sdp_ptr, u16 level,
+                                                     u8 cap_num,
+diff --git a/media/webrtc/signaling/src/sipcc/core/sdp/sdp_attr.c b/media/webrtc/signaling/src/sipcc/core/sdp/sdp_attr.c
+--- a/media/webrtc/signaling/src/sipcc/core/sdp/sdp_attr.c
++++ b/media/webrtc/signaling/src/sipcc/core/sdp/sdp_attr.c
+@@ -1217,29 +1217,29 @@ sdp_result_e sdp_parse_attr_fmtp (sdp_t 
+         fmtp_p->max_mbps = (u32) strtoul_result;
+ 	    codec_info_found = TRUE;
+         } else if (cpr_strncasecmp(tmp,sdp_fmtp_codec_param[25].name,
+                                sdp_fmtp_codec_param[25].strlen) == 0) {
+ 	    fmtp_ptr = sdp_getnextstrtok(fmtp_ptr, tmp, sizeof(tmp), "; \t", &result1);
+ 	    if (result1 != SDP_SUCCESS) {
+ 	        fmtp_ptr = sdp_getnextstrtok(fmtp_ptr, tmp, sizeof(tmp), " \t", &result1);
+ 	        if (result1 != SDP_SUCCESS) {
+-                    sdp_attr_fmtp_no_value(sdp_p, "max_fs");
++                    sdp_attr_fmtp_no_value(sdp_p, "max-fs");
+ 		    SDP_FREE(temp_ptr);
+                     return SDP_INVALID_PARAMETER;
+ 		}
+ 	    }
+ 	    tok = tmp;
+ 	    tok++;
+ 
+             errno = 0;
+             strtoul_result = strtoul(tok, &strtoul_end, 10);
+ 
+             if (errno || tok == strtoul_end || strtoul_result == 0 || strtoul_result > UINT_MAX) {
+-                sdp_attr_fmtp_invalid_value(sdp_p, "max_fs", tok);
++                sdp_attr_fmtp_invalid_value(sdp_p, "max-fs", tok);
+                 SDP_FREE(temp_ptr);
+                 return SDP_INVALID_PARAMETER;
+ 	    }
+ 	    fmtp_p->fmtp_format = SDP_FMTP_CODEC_INFO;
+             fmtp_p->max_fs = (u32) strtoul_result;
+ 	    codec_info_found = TRUE;
+         } else if (cpr_strncasecmp(tmp,sdp_fmtp_codec_param[26].name,
+                                sdp_fmtp_codec_param[26].strlen) == 0) {
+@@ -1732,16 +1732,43 @@ sdp_result_e sdp_parse_attr_fmtp (sdp_t 
+                  }
+              }
+              tok = tmp;
+              tok++;
+              fmtp_p->fmtp_format = SDP_FMTP_DATACHANNEL;
+              sstrncpy(fmtp_p->protocol , tok, sizeof(fmtp_p->protocol));
+ 			 codec_info_found = TRUE;
+ 
++        } else if (cpr_strncasecmp(tmp,sdp_fmtp_codec_param[51].name,
++                                   sdp_fmtp_codec_param[51].strlen) == 0) {
++            fmtp_ptr = sdp_getnextstrtok(fmtp_ptr, tmp, sizeof(tmp), "; \t",
++                                         &result1);
++            if (result1 != SDP_SUCCESS) {
++                fmtp_ptr = sdp_getnextstrtok(fmtp_ptr, tmp, sizeof(tmp),
++                                             " \t", &result1);
++                if (result1 != SDP_SUCCESS) {
++                    sdp_attr_fmtp_no_value(sdp_p, "max-fr");
++                    SDP_FREE(temp_ptr);
++                    return SDP_INVALID_PARAMETER;
++                }
++            }
++            tok = tmp;
++            tok++;
++            errno = 0;
++            strtoul_result = strtoul(tok, &strtoul_end, 10);
++            if (errno || tok == strtoul_end || strtoul_result == 0 ||
++                strtoul_result > UINT_MAX) {
++                sdp_attr_fmtp_invalid_value(sdp_p, "max-fr", tok);
++                SDP_FREE(temp_ptr);
++                return SDP_INVALID_PARAMETER;
++            }
++            fmtp_p->fmtp_format = SDP_FMTP_CODEC_INFO;
++            fmtp_p->max_fr = (u32) strtoul_result;
++            codec_info_found = TRUE;
++
+         } else if (fmtp_ptr != NULL && *fmtp_ptr == '\n') {
+             temp=PL_strtok_r(tmp, ";", &strtok_state);
+             if (temp) {
+                 if (sdp_p->debug_flag[SDP_DEBUG_TRACE]) {
+                     SDP_PRINT("%s Annexes are possibly there for this fmtp %s  tmp: %s line\n",
+                               sdp_p->debug_str, fmtp_ptr, tmp);
+                 }
+                 while (temp != NULL) {
+@@ -2038,16 +2065,18 @@ sdp_result_e sdp_build_attr_fmtp (sdp_t 
+       FMTP_BUILD_UNSIGNED(fmtp_p->flag & SDP_INIT_BUF_TIME_FLAG,
+         "sprop-init-buf-time", fmtp_p->init_buf_time)
+ 
+       FMTP_BUILD_UNSIGNED(fmtp_p->max_mbps > 0,
+         "max-mbps", fmtp_p->max_mbps)
+ 
+       FMTP_BUILD_UNSIGNED(fmtp_p->max_fs > 0, "max-fs", fmtp_p->max_fs)
+ 
++      FMTP_BUILD_UNSIGNED(fmtp_p->max_fr > 0, "max-fr", fmtp_p->max_fr)
++
+       FMTP_BUILD_UNSIGNED(fmtp_p->max_cpb > 0, "max-cpb", fmtp_p->max_cpb)
+ 
+       FMTP_BUILD_UNSIGNED(fmtp_p->max_dpb > 0, "max-dpb", fmtp_p->max_dpb)
+ 
+       FMTP_BUILD_UNSIGNED(fmtp_p->max_br > 0, "max-br", fmtp_p->max_br)
+ 
+       FMTP_BUILD_UNSIGNED(fmtp_p->redundant_pic_cap > 0,
+         "redundant-pic-cap", fmtp_p->redundant_pic_cap)
+diff --git a/media/webrtc/signaling/src/sipcc/core/sdp/sdp_attr_access.c b/media/webrtc/signaling/src/sipcc/core/sdp/sdp_attr_access.c
+--- a/media/webrtc/signaling/src/sipcc/core/sdp/sdp_attr_access.c
++++ b/media/webrtc/signaling/src/sipcc/core/sdp/sdp_attr_access.c
+@@ -452,16 +452,17 @@ void sdp_copy_attr_fields (sdp_attr_t *s
+ 		 src_attr_p->attr.fmtp.init_buf_time;
+         dst_attr_p->attr.fmtp.packetization_mode =
+ 		 src_attr_p->attr.fmtp.packetization_mode;
+         dst_attr_p->attr.fmtp.flag =
+                  src_attr_p->attr.fmtp.flag;
+ 
+         dst_attr_p->attr.fmtp.max_mbps = src_attr_p->attr.fmtp.max_mbps;
+         dst_attr_p->attr.fmtp.max_fs = src_attr_p->attr.fmtp.max_fs;
++        dst_attr_p->attr.fmtp.max_fr = src_attr_p->attr.fmtp.max_fr;
+         dst_attr_p->attr.fmtp.max_cpb = src_attr_p->attr.fmtp.max_cpb;
+         dst_attr_p->attr.fmtp.max_dpb = src_attr_p->attr.fmtp.max_dpb;
+         dst_attr_p->attr.fmtp.max_br = src_attr_p->attr.fmtp.max_br;
+         dst_attr_p->attr.fmtp.redundant_pic_cap =
+             src_attr_p->attr.fmtp.redundant_pic_cap;
+         dst_attr_p->attr.fmtp.deint_buf_cap =
+ 		 src_attr_p->attr.fmtp.deint_buf_cap;
+         dst_attr_p->attr.fmtp.max_rcmd_nalu_size =
+@@ -857,16 +858,17 @@ sdp_result_e sdp_copy_attr (void *src_sd
+                  src_attr_p->attr.fmtp.init_buf_time;
+         new_attr_p->attr.fmtp.packetization_mode =
+                  src_attr_p->attr.fmtp.packetization_mode;
+         new_attr_p->attr.fmtp.flag =
+                  src_attr_p->attr.fmtp.flag;
+ 
+         new_attr_p->attr.fmtp.max_mbps = src_attr_p->attr.fmtp.max_mbps;
+         new_attr_p->attr.fmtp.max_fs = src_attr_p->attr.fmtp.max_fs;
++        new_attr_p->attr.fmtp.max_fr = src_attr_p->attr.fmtp.max_fr;
+         new_attr_p->attr.fmtp.max_cpb = src_attr_p->attr.fmtp.max_cpb;
+         new_attr_p->attr.fmtp.max_dpb = src_attr_p->attr.fmtp.max_dpb;
+         new_attr_p->attr.fmtp.max_br = src_attr_p->attr.fmtp.max_br;
+         new_attr_p->attr.fmtp.redundant_pic_cap =
+             src_attr_p->attr.fmtp.redundant_pic_cap;
+         new_attr_p->attr.fmtp.deint_buf_cap =
+ 		 src_attr_p->attr.fmtp.deint_buf_cap;
+         new_attr_p->attr.fmtp.max_rcmd_nalu_size =
+@@ -6199,16 +6201,49 @@ sdp_result_e sdp_attr_set_fmtp_max_fs (v
+     if (max_fs > 0) {
+         fmtp_p->max_fs  = max_fs;
+         return (SDP_SUCCESS);
+     } else {
+         return (SDP_FAILURE);
+     }
+ }
+ 
++sdp_result_e sdp_attr_set_fmtp_max_fr (void *sdp_ptr, u16 level,
++                                       u8 cap_num, u16 inst_num,
++                                       u32 max_fr)
++{
++    sdp_t       *sdp_p = (sdp_t *)sdp_ptr;
++    sdp_attr_t  *attr_p;
++    sdp_fmtp_t  *fmtp_p;
++
++    if (sdp_verify_sdp_ptr(sdp_p) == FALSE) {
++        return (SDP_INVALID_PARAMETER);
++    }
++
++    attr_p = sdp_find_attr(sdp_p, level, cap_num, SDP_ATTR_FMTP, inst_num);
++    if (attr_p == NULL) {
++        if (sdp_p->debug_flag[SDP_DEBUG_ERRORS]) {
++            CSFLogError(logTag, "%s fmtp attribute, level %u instance %u "
++                      "not found.", sdp_p->debug_str, level, inst_num);
++        }
++        sdp_p->conf_p->num_invalid_param++;
++        return (SDP_INVALID_PARAMETER);
++    }
++
++    fmtp_p = &(attr_p->attr.fmtp);
++    fmtp_p->fmtp_format = SDP_FMTP_CODEC_INFO;
++
++    if (max_fr > 0) {
++        fmtp_p->max_fr  = max_fr;
++        return (SDP_SUCCESS);
++    } else {
++        return (SDP_FAILURE);
++    }
++}
++
+ sdp_result_e sdp_attr_set_fmtp_max_br (void *sdp_ptr, u16 level,
+                                        u8 cap_num, u16 inst_num,
+                                        u32 max_br)
+ {
+     sdp_t       *sdp_p = (sdp_t *)sdp_ptr;
+     sdp_attr_t  *attr_p;
+     sdp_fmtp_t  *fmtp_p;
+ 
+@@ -8054,16 +8089,51 @@ sdp_result_e sdp_attr_get_fmtp_max_fs (v
+         sdp_p->conf_p->num_invalid_param++;
+         return (SDP_INVALID_PARAMETER);
+     } else {
+         *val = attr_p->attr.fmtp.max_fs;
+         return (SDP_SUCCESS);
+     }
+ }
+ 
++/* Function:    sdp_attr_get_fmtp_max_fr
++ * Description: Gets the value of the fmtp attribute- max-fr parameter
++ * Parameters:  sdp_ptr     The SDP handle returned by sdp_init_description.
++ *              level       The level to check for the attribute.
++ *              cap_num     The capability number associated with the
++ *                          attribute if any.  If none, should be zero.
++ *              inst_num    The attribute instance number to check.
++ * Returns:     max-fr value.
++ */
++
++sdp_result_e sdp_attr_get_fmtp_max_fr (void *sdp_ptr, u16 level,
++                             u8 cap_num, u16 inst_num, u32 *val)
++{
++    sdp_t       *sdp_p = (sdp_t *)sdp_ptr;
++    sdp_attr_t  *attr_p;
++
++    if (sdp_verify_sdp_ptr(sdp_p) == FALSE) {
++        return (SDP_INVALID_SDP_PTR);
++    }
++
++    attr_p = sdp_find_attr(sdp_p, level, cap_num, SDP_ATTR_FMTP,
++                           inst_num);
++    if (attr_p == NULL) {
++        if (sdp_p->debug_flag[SDP_DEBUG_ERRORS]) {
++            CSFLogError(logTag, "%s fmtp attribute, level %u instance %u "
++                      "not found.", sdp_p->debug_str, level, inst_num);
++        }
++        sdp_p->conf_p->num_invalid_param++;
++        return (SDP_INVALID_PARAMETER);
++    } else {
++        *val = attr_p->attr.fmtp.max_fr;
++        return (SDP_SUCCESS);
++    }
++}
++
+ /* Function:    sdp_attr_get_fmtp_max_cpb
+  * Description: Gets the value of the fmtp attribute- max-cpb parameter for H.264 codec
+  * Parameters:  sdp_ptr     The SDP handle returned by sdp_init_description.
+  *              level       The level to check for the attribute.
+  *              cap_num     The capability number associated with the
+  *                          attribute if any.  If none, should be zero.
+  *              inst_num    The attribute instance number to check.
+  * Returns:     max-cpb value.
+diff --git a/media/webrtc/signaling/src/sipcc/core/sdp/sdp_main.c b/media/webrtc/signaling/src/sipcc/core/sdp/sdp_main.c
+--- a/media/webrtc/signaling/src/sipcc/core/sdp/sdp_main.c
++++ b/media/webrtc/signaling/src/sipcc/core/sdp/sdp_main.c
+@@ -391,17 +391,18 @@ const sdp_namearray_t sdp_fmtp_codec_par
+     {"level-asymmetry-allowed",         sizeof("level-asymmetry-allowed")}, /* 42 */
+     {"maxaveragebitrate",               sizeof("maxaveragebitrate")}, /* 43 */
+     {"usedtx",                          sizeof("usedtx")}, /* 44 */
+     {"stereo",                          sizeof("stereo")}, /* 45 */
+     {"useinbandfec",                    sizeof("useinbandfec")}, /* 46 */
+     {"maxcodedaudiobandwidth",          sizeof("maxcodedaudiobandwidth")}, /* 47 */
+     {"cbr",                             sizeof("cbr")}, /* 48 */
+     {"streams",                         sizeof("streams")}, /* 49 */
+-    {"protocol",                        sizeof("protocol")} /* 50 */
++    {"protocol",                        sizeof("protocol")}, /* 50 */
++    {"max-fr",                          sizeof("max-fr")} /* 51 */
+ 
+ } ;
+ 
+ /* Note: These *must* be in the same order as the enum type. */
+ const sdp_namearray_t sdp_fmtp_codec_param_val[SDP_MAX_FMTP_PARAM_VAL] =
+ {
+     {"yes",                 sizeof("yes")},
+     {"no",                  sizeof("no")}
+diff --git a/media/webrtc/signaling/test/sdp_unittests.cpp b/media/webrtc/signaling/test/sdp_unittests.cpp
+--- a/media/webrtc/signaling/test/sdp_unittests.cpp
++++ b/media/webrtc/signaling/test/sdp_unittests.cpp
+@@ -1,14 +1,16 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "CSFLog.h"
+ 
++#include <iostream>
++
+ #include <string>
+ 
+ #define GTEST_HAS_RTTI 0
+ #include "gtest/gtest.h"
+ #include "gtest_utils.h"
+ 
+ #include "nspr.h"
+ #include "nss.h"
+@@ -182,16 +184,51 @@ class SdpTest : public ::testing::Test {
+       u16 inst_num = 0;
+       EXPECT_EQ(sdp_add_new_attr(sdp_ptr_, level, 0, SDP_ATTR_RTCP_FB,
+                                  &inst_num), SDP_SUCCESS);
+       EXPECT_EQ(sdp_attr_set_rtcp_fb_ccm(sdp_ptr_, level, payload, inst_num,
+                                          type), SDP_SUCCESS);
+       return inst_num;
+     }
+ 
++    u16 AddNewFmtpMaxFs(int level, u32 max_fs) {
++      u16 inst_num = 0;
++      EXPECT_EQ(sdp_add_new_attr(sdp_ptr_, level, 0, SDP_ATTR_FMTP,
++                                 &inst_num), SDP_SUCCESS);
++      EXPECT_EQ(sdp_attr_set_fmtp_payload_type(sdp_ptr_, level, 0, inst_num,
++                                               120), SDP_SUCCESS);
++      EXPECT_EQ(sdp_attr_set_fmtp_max_fs(sdp_ptr_, level, 0, inst_num, max_fs),
++                                         SDP_SUCCESS);
++      return inst_num;
++    }
++
++    u16 AddNewFmtpMaxFr(int level, u32 max_fr) {
++      u16 inst_num = 0;
++      EXPECT_EQ(sdp_add_new_attr(sdp_ptr_, level, 0, SDP_ATTR_FMTP,
++                                 &inst_num), SDP_SUCCESS);
++      EXPECT_EQ(sdp_attr_set_fmtp_payload_type(sdp_ptr_, level, 0, inst_num,
++                                               120), SDP_SUCCESS);
++      EXPECT_EQ(sdp_attr_set_fmtp_max_fr(sdp_ptr_, level, 0, inst_num, max_fr),
++                                         SDP_SUCCESS);
++      return inst_num;
++    }
++
++     u16 AddNewFmtpMaxFsFr(int level, u32 max_fs, u32 max_fr) {
++      u16 inst_num = 0;
++      EXPECT_EQ(sdp_add_new_attr(sdp_ptr_, level, 0, SDP_ATTR_FMTP,
++                                 &inst_num), SDP_SUCCESS);
++      EXPECT_EQ(sdp_attr_set_fmtp_payload_type(sdp_ptr_, level, 0, inst_num,
++                                               120), SDP_SUCCESS);
++      EXPECT_EQ(sdp_attr_set_fmtp_max_fs(sdp_ptr_, level, 0, inst_num, max_fs),
++                                         SDP_SUCCESS);
++      EXPECT_EQ(sdp_attr_set_fmtp_max_fr(sdp_ptr_, level, 0, inst_num, max_fr),
++                                         SDP_SUCCESS);
++      return inst_num;
++    }
++
+   protected:
+     int final_level_;
+     void *config_p_;
+     sdp_t *sdp_ptr_;
+ };
+ 
+ static const std::string kVideoSdp =
+   "v=0\r\n"
+@@ -456,16 +493,55 @@ TEST_F(SdpTest, addRtcpFbCcmFir) {
+ TEST_F(SdpTest, addRtcpFbCcmFirAllPt) {
+   InitLocalSdp();
+   int level = AddNewMedia(SDP_MEDIA_VIDEO);
+   AddNewRtcpFbCcm(level, SDP_RTCP_FB_CCM_FIR);
+   std::string body = SerializeSdp();
+   ASSERT_NE(body.find("a=rtcp-fb:* ccm fir\r\n"), std::string::npos);
+ }
+ 
++TEST_F(SdpTest, parseFmtpMaxFs) {
++  u32 val = 0;
++  ParseSdp(kVideoSdp + "a=fmtp:120 max-fs=300;max-fr=30\r\n");
++  ASSERT_EQ(sdp_attr_get_fmtp_max_fs(sdp_ptr_, 1, 0, 1, &val), SDP_SUCCESS);
++  ASSERT_EQ(val, 300);
++}
++
++TEST_F(SdpTest, parseFmtpMaxFr) {
++  u32 val = 0;
++  ParseSdp(kVideoSdp + "a=fmtp:120 max-fs=300;max-fr=30\r\n");
++  ASSERT_EQ(sdp_attr_get_fmtp_max_fr(sdp_ptr_, 1, 0, 1, &val), SDP_SUCCESS);
++  ASSERT_EQ(val, 30);
++}
++
++TEST_F(SdpTest, addFmtpMaxFs) {
++  InitLocalSdp();
++  int level = AddNewMedia(SDP_MEDIA_VIDEO);
++  AddNewFmtpMaxFs(level, 300);
++  std::string body = SerializeSdp();
++  ASSERT_NE(body.find("a=fmtp:120 max-fs=300\r\n"), std::string::npos);
++}
++
++TEST_F(SdpTest, addFmtpMaxFr) {
++  InitLocalSdp();
++  int level = AddNewMedia(SDP_MEDIA_VIDEO);
++  AddNewFmtpMaxFr(level, 30);
++  std::string body = SerializeSdp();
++  ASSERT_NE(body.find("a=fmtp:120 max-fr=30\r\n"), std::string::npos);
++}
++
++TEST_F(SdpTest, addFmtpMaxFsFr) {
++  InitLocalSdp();
++  int level = AddNewMedia(SDP_MEDIA_VIDEO);
++  AddNewFmtpMaxFsFr(level, 300, 30);
++  std::string body = SerializeSdp();
++  ASSERT_NE(body.find("a=fmtp:120 max-fs=300;max-fr=30\r\n"),
++            std::string::npos);
++}
++
+ /* TODO We need to test the pt=* use cases. */
+ 
+ } // End namespace test.
+ 
+ int main(int argc, char **argv) {
+   test_utils = new MtransportTestUtils();
+   NSS_NoDB_Init(NULL);
+   NSS_SetDomesticPolicy();

@@ -1,0 +1,721 @@
+# HG changeset patch
+# Parent 3555f50250cc9883810c5d45ab7caa65b93ba453
+# User Shian-Yow Wu <swu@mozilla.com>
+Part 2: Device configuration for max-fs and max-fr.
+
+diff --git a/media/webrtc/signaling/src/media-conduit/CodecConfig.h b/media/webrtc/signaling/src/media-conduit/CodecConfig.h
+--- a/media/webrtc/signaling/src/media-conduit/CodecConfig.h
++++ b/media/webrtc/signaling/src/media-conduit/CodecConfig.h
+@@ -51,21 +51,32 @@ struct AudioCodecConfig
+ struct VideoCodecConfig
+ {
+   /*
+    * The data-types for these properties mimic the
+    * corresponding webrtc::VideoCodec data-types.
+    */
+   int mType;
+   std::string mName;
++  int mWidth;
++  int mHeight;
++  int mMaxFrameRate;
+ 
+   /* When we have resolution negotiation information (RFC 6236)
+    * it will be stored here.
+    */
+ 
+   VideoCodecConfig(int type, std::string name): mType(type),
+                                                 mName(name)
+   {
+   }
+ 
++  VideoCodecConfig(int type, std::string name,int width,
++                   int height, int max_fr): mType(type),
++                                            mName(name),
++                                            mWidth(width),
++                                            mHeight(height),
++                                            mMaxFrameRate(max_fr)
++  {
++  }
+ };
+ }
+ #endif
+diff --git a/media/webrtc/signaling/src/media-conduit/VideoConduit.cpp b/media/webrtc/signaling/src/media-conduit/VideoConduit.cpp
+--- a/media/webrtc/signaling/src/media-conduit/VideoConduit.cpp
++++ b/media/webrtc/signaling/src/media-conduit/VideoConduit.cpp
+@@ -424,17 +424,20 @@ WebrtcVideoConduit::ConfigureSendMediaCo
+                 mPtrViEBase->LastError());
+     return kMediaConduitUnknownError;
+   }
+ 
+   //Copy the applied codec for future reference
+   delete mCurSendCodecConfig;
+ 
+   mCurSendCodecConfig = new VideoCodecConfig(codecConfig->mType,
+-                                             codecConfig->mName);
++                                             codecConfig->mName,
++                                             codecConfig->mWidth,
++                                             codecConfig->mHeight,
++                                             codecConfig->mMaxFrameRate);
+ 
+   mPtrRTP->SetRembStatus(mChannel, true, false);
+ 
+   // by now we should be successfully started the transmission
+   mEngineTransmitting = true;
+   return kMediaConduitNoError;
+ }
+ 
+@@ -542,16 +545,30 @@ WebrtcVideoConduit::ConfigureRecvMediaCo
+ // XXX we need to figure out how to feed back changes in preferred capture
+ // resolution to the getUserMedia source
+ bool
+ WebrtcVideoConduit::SelectSendResolution(unsigned short width,
+                                          unsigned short height)
+ {
+   // XXX This will do bandwidth-resolution adaptation as well - bug 877954
+ 
++printf_stderr("SelectSendResolution() %d %d %d %d\n", width, height, mSendingWidth, mSendingHeight);
++  // Don't change resolution if width and height are defined in the original
++  // codec configuration.
++  if (mCurSendCodecConfig &&
++      mCurSendCodecConfig->mWidth > 0 &&
++      mCurSendCodecConfig->mHeight > 0 &&
++      (mCurSendCodecConfig->mWidth * mCurSendCodecConfig->mHeight <
++       width * height))
++  {
++printf_stderr("SelectSendResolution() don't change resolution %d %d\n", 
++   mCurSendCodecConfig->mWidth, mCurSendCodecConfig->mHeight);
++    return true;
++  }
++
+   // Adapt to getUserMedia resolution changes
+   // check if we need to reconfigure the sending resolution
+   if (mSendingWidth != width || mSendingHeight != height)
+   {
+     // This will avoid us continually retrying this operation if it fails.
+     // If the resolution changes, we'll try again.  In the meantime, we'll
+     // keep using the old size in the encoder.
+     mSendingWidth = width;
+@@ -589,16 +606,18 @@ MediaConduitErrorCode
+ WebrtcVideoConduit::SendVideoFrame(unsigned char* video_frame,
+                                    unsigned int video_frame_length,
+                                    unsigned short width,
+                                    unsigned short height,
+                                    VideoType video_type,
+                                    uint64_t capture_time)
+ {
+ 
++printf_stderr("===== SendVideoFrame() %d %d\n", width, height);
++
+   CSFLogDebug(logTag,  "%s ", __FUNCTION__);
+ 
+   //check for  the parameters sanity
+   if(!video_frame || video_frame_length == 0 ||
+      width == 0 || height == 0)
+   {
+     CSFLogError(logTag,  "%s Invalid Parameters ",__FUNCTION__);
+     MOZ_ASSERT(PR_FALSE);
+@@ -775,27 +794,38 @@ WebrtcVideoConduit::DeliverFrame(unsigne
+  * Copy the codec passed into Conduit's database
+  */
+ 
+ void
+ WebrtcVideoConduit::CodecConfigToWebRTCCodec(const VideoCodecConfig* codecInfo,
+                                               webrtc::VideoCodec& cinst)
+ {
+   cinst.plType  = codecInfo->mType;
+-  // leave width/height alone; they'll be overridden on the first frame
++  if (codecInfo->mWidth > 0 && codecInfo->mHeight > 0)
++  {
++    cinst.width = codecInfo->mWidth;
++    cinst.height = codecInfo->mHeight;
++  }
++  if (codecInfo->mMaxFrameRate > 0)
++  {
++    cinst.maxFramerate = codecInfo->mMaxFrameRate;
++  }
+   cinst.minBitrate = 200;
+   cinst.startBitrate = 300;
+   cinst.maxBitrate = 2000;
+ }
+ 
+ bool
+ WebrtcVideoConduit::CopyCodecToDB(const VideoCodecConfig* codecInfo)
+ {
+   VideoCodecConfig* cdcConfig = new VideoCodecConfig(codecInfo->mType,
+-                                                     codecInfo->mName);
++                                                     codecInfo->mName,
++                                                     codecInfo->mWidth,
++                                                     codecInfo->mHeight,
++                                                     codecInfo->mMaxFrameRate);
+   mRecvCodecList.push_back(cdcConfig);
+   return true;
+ }
+ 
+ /**
+  * Checks if the codec is already in Conduit's database
+  */
+ 
+@@ -819,18 +849,21 @@ bool
+ WebrtcVideoConduit::CheckCodecsForMatch(const VideoCodecConfig* curCodecConfig,
+                                         const VideoCodecConfig* codecInfo) const
+ {
+   if(!curCodecConfig)
+   {
+     return false;
+   }
+ 
+-  if(curCodecConfig->mType   == codecInfo->mType &&
+-     curCodecConfig->mName.compare(codecInfo->mName) == 0)
++  if(curCodecConfig->mType  == codecInfo->mType &&
++     curCodecConfig->mName.compare(codecInfo->mName) == 0 &&
++     curCodecConfig->mWidth == codecInfo->mWidth &&
++     curCodecConfig->mHeight == codecInfo->mHeight &&
++     curCodecConfig->mMaxFrameRate == codecInfo->mMaxFrameRate)
+   {
+     return true;
+   }
+ 
+   return false;
+ }
+ 
+ /**
+@@ -874,12 +907,15 @@ WebrtcVideoConduit::ValidateCodecConfig(
+ 
+ void
+ WebrtcVideoConduit::DumpCodecDB() const
+ {
+   for(std::vector<VideoCodecConfig*>::size_type i=0;i<mRecvCodecList.size();i++)
+   {
+     CSFLogDebug(logTag,"Payload Name: %s", mRecvCodecList[i]->mName.c_str());
+     CSFLogDebug(logTag,"Payload Type: %d", mRecvCodecList[i]->mType);
++    CSFLogDebug(logTag,"Payload Width: %d", mRecvCodecList[i]->mWidth);
++    CSFLogDebug(logTag,"Payload Height: %d", mRecvCodecList[i]->mHeight);
++    CSFLogDebug(logTag,"Payload Max Frame Rate: %d", mRecvCodecList[i]->mMaxFrameRate);
+   }
+ }
+ 
+ }// end namespace
+diff --git a/media/webrtc/signaling/src/media/VcmSIPCCBinding.cpp b/media/webrtc/signaling/src/media/VcmSIPCCBinding.cpp
+--- a/media/webrtc/signaling/src/media/VcmSIPCCBinding.cpp
++++ b/media/webrtc/signaling/src/media/VcmSIPCCBinding.cpp
+@@ -19,16 +19,20 @@
+ #include "transportflow.h"
+ #include "transportlayer.h"
+ #include "transportlayerdtls.h"
+ #include "transportlayerice.h"
+ #include "runnable_utils.h"
+ #include "cpr_stdlib.h"
+ #include "cpr_string.h"
+ #include "mozilla/SyncRunnable.h"
++#include "mozilla/Services.h"
++#include "nsServiceManagerUtils.h"
++#include "nsIPrefService.h"
++#include "nsIPrefBranch.h"
+ 
+ #include <stdlib.h>
+ #include <stdio.h>
+ #include <ssl.h>
+ #include <sslproto.h>
+ #include <algorithm>
+ 
+ extern "C" {
+@@ -63,16 +67,17 @@ typedef enum {
+ /* static */
+ 
+ using namespace CSF;
+ 
+ VcmSIPCCBinding * VcmSIPCCBinding::gSelf = NULL;
+ int VcmSIPCCBinding::gAudioCodecMask = 0;
+ int VcmSIPCCBinding::gVideoCodecMask = 0;
+ nsIThread *VcmSIPCCBinding::gMainThread = NULL;
++nsCOMPtr<nsIPrefBranch> VcmSIPCCBinding::gBranch = NULL;
+ 
+ static mozilla::RefPtr<TransportFlow> vcmCreateTransportFlow(sipcc::PeerConnectionImpl *pc,
+                                                              int level, bool rtcp,
+                                                              const char *fingerprint_alg,
+                                                              const char *fingerprint
+                                                              );
+ 
+ // Convenience macro to acquire PC
+@@ -93,22 +98,31 @@ static mozilla::RefPtr<TransportFlow> vc
+     }         \
+   } while(0)
+ 
+ VcmSIPCCBinding::VcmSIPCCBinding ()
+   : streamObserver(NULL)
+ {
+     delete gSelf;//delete is NULL safe, so I don't need to check if it's NULL
+     gSelf = this;
++
++  nsresult rv;
++
++  nsCOMPtr<nsIPrefService> prefs = do_GetService("@mozilla.org/preferences-service;1", &rv);
++  if (NS_SUCCEEDED(rv)) {
++    gBranch = do_QueryInterface(prefs);
++  }
+ }
+ 
+ VcmSIPCCBinding::~VcmSIPCCBinding ()
+ {
+     assert(gSelf);
+     gSelf = NULL;
++
++  gBranch = NULL;
+ }
+ 
+ void VcmSIPCCBinding::setStreamObserver(StreamObserver* obs)
+ {
+ 	streamObserver = obs;
+ }
+ 
+ /* static */
+@@ -161,16 +175,21 @@ void VcmSIPCCBinding::setMainThread(nsIT
+   gMainThread = thread;
+ }
+ 
+ nsIThread* VcmSIPCCBinding::getMainThread()
+ {
+   return gMainThread;
+ }
+ 
++nsCOMPtr<nsIPrefBranch> VcmSIPCCBinding::getPrefBranch()
++{
++  return gBranch;
++}
++
+ /* static */
+ AudioTermination * VcmSIPCCBinding::getAudioTermination()
+ {
+     // commenting as part of media provider removal
+     return NULL;
+ }
+ 
+ /* static */
+@@ -2099,17 +2118,20 @@ static int vcmTxStartICE_m(cc_mcapid_t m
+ 
+     // Now we have all the pieces, create the pipeline
+     stream->StorePipeline(pc_track_id, pipeline);
+ 
+   } else if (CC_IS_VIDEO(mcap_id)) {
+     mozilla::VideoCodecConfig *config_raw;
+     config_raw = new mozilla::VideoCodecConfig(
+       payload->remote_rtp_pt,
+-      ccsdpCodecName(payload->codec_type));
++      ccsdpCodecName(payload->codec_type),
++      payload->video.width,
++      payload->video.height,
++      payload->video.max_fr);
+ 
+     // Take possession of this pointer
+     mozilla::ScopedDeletePtr<mozilla::VideoCodecConfig> config(config_raw);
+ 
+     // Instantiate an appropriate conduit
+     mozilla::RefPtr<mozilla::VideoSessionConduit> conduit =
+       mozilla::VideoSessionConduit::Create();
+ 
+@@ -2850,9 +2872,51 @@ int vcmOnSdpParseError(const char *peerc
+   if (!NS_SUCCEEDED(rv)) {
+     CSFLogError( logTag, "%s(): Could not dispatch to main thread", __FUNCTION__);
+     return VCM_ERROR;
+   }
+ 
+   return 0;
+ }
+ 
+-
++static short vcmGetVideoMaxFs_m(uint16_t codec,
++                                int32_t *max_fs) {
++  nsCOMPtr<nsIPrefBranch> branch = VcmSIPCCBinding::getPrefBranch();
++  if (branch) {
++    branch->GetIntPref("media.navigator.video.max_fs", max_fs);
++    return 0;
++  }
++  return VCM_ERROR;
++}
++
++short vcmGetVideoMaxFs(uint16_t codec,
++                       int32_t *max_fs) {
++  short ret; 
++
++  mozilla::SyncRunnable::DispatchToThread(VcmSIPCCBinding::getMainThread(),
++      WrapRunnableNMRet(&vcmGetVideoMaxFs_m,
++                        codec,
++                        max_fs,
++                        &ret));
++  return ret; 
++}
++
++static short vcmGetVideoMaxFr_m(uint16_t codec,
++                                int32_t *max_fr) {
++  nsCOMPtr<nsIPrefBranch> branch = VcmSIPCCBinding::getPrefBranch();
++  if (branch) {
++    branch->GetIntPref("media.navigator.video.max_fr", max_fr);
++    return 0;
++  }
++  return VCM_ERROR;
++}
++
++short vcmGetVideoMaxFr(uint16_t codec,
++                       int32_t *max_fr) {
++  short ret; 
++
++  mozilla::SyncRunnable::DispatchToThread(VcmSIPCCBinding::getMainThread(),
++      WrapRunnableNMRet(&vcmGetVideoMaxFr_m,
++                        codec,
++                        max_fr,
++                        &ret));
++  return ret; 
++}
+diff --git a/media/webrtc/signaling/src/media/VcmSIPCCBinding.h b/media/webrtc/signaling/src/media/VcmSIPCCBinding.h
+--- a/media/webrtc/signaling/src/media/VcmSIPCCBinding.h
++++ b/media/webrtc/signaling/src/media/VcmSIPCCBinding.h
+@@ -5,16 +5,17 @@
+ #ifndef _CSF_VCM_SIPCC_BINDING_H_
+ #define _CSF_VCM_SIPCC_BINDING_H_
+ 
+ extern "C"
+ {
+ #include "ccapi_types.h"
+ }
+ 
++class nsIPrefBranch;
+ class nsIThread;
+ 
+ namespace CSF
+ {
+     class AudioTermination;
+     class VideoTermination;
+     class AudioControl;
+     class VideoControl;
+@@ -53,21 +54,24 @@ namespace CSF
+         static void setVideoCodecs(int codecMask);
+ 
+         static int getAudioCodecs();
+         static int getVideoCodecs();
+ 
+ 	static void setMainThread(nsIThread *thread);
+ 	static nsIThread *getMainThread();
+ 
++        static nsCOMPtr<nsIPrefBranch> getPrefBranch();
++
+     private:
+         static VcmSIPCCBinding * gSelf;
+         StreamObserver* streamObserver;
+         MediaProviderObserver *mediaProviderObserver;
+         static int gAudioCodecMask;
+         static int gVideoCodecMask;
+ 	static nsIThread *gMainThread;
++        static nsCOMPtr<nsIPrefBranch> gBranch;
+     };
+ }
+ 
+ #endif
+ 
+ 
+diff --git a/media/webrtc/signaling/src/sipcc/core/common/prot_configmgr.c b/media/webrtc/signaling/src/sipcc/core/common/prot_configmgr.c
+--- a/media/webrtc/signaling/src/sipcc/core/common/prot_configmgr.c
++++ b/media/webrtc/signaling/src/sipcc/core/common/prot_configmgr.c
+@@ -566,16 +566,38 @@ sip_config_local_supported_codecs_get (r
+                 count++;
+             }
+         }
+         codec++;
+     }
+     return count;
+ }
+ 
++uint32_t
++config_get_video_max_fs(const rtp_ptype codec)
++{
++  uint32_t max_fs;
++
++  if(vcmGetVideoMaxFs(codec, &max_fs) == 0) {
++    return max_fs;
++  }
++  return 0;
++}
++
++uint32_t
++config_get_video_max_fr(const rtp_ptype codec)
++{
++  uint32_t max_fr;
++
++  if(vcmGetVideoMaxFr(codec, &max_fr) == 0) {
++    return max_fr;
++  }
++  return 0;
++}
++
+ /*
+  * sip_config_local_supported_codecs_get()
+  *
+  * Get the locally supported codec list.
+  */
+ uint16_t
+ sip_config_video_supported_codecs_get (rtp_ptype aSupportedCodecs[],
+                           uint16_t supportedCodecsLen, boolean isOffer)
+diff --git a/media/webrtc/signaling/src/sipcc/core/common/prot_configmgr.h b/media/webrtc/signaling/src/sipcc/core/common/prot_configmgr.h
+--- a/media/webrtc/signaling/src/sipcc/core/common/prot_configmgr.h
++++ b/media/webrtc/signaling/src/sipcc/core/common/prot_configmgr.h
+@@ -287,10 +287,12 @@ line_t sip_config_get_line_from_button(l
+ boolean sip_config_check_line(line_t line);
+ line_t sip_config_local_line_get(void);
+ void sip_config_get_display_name(line_t line, char *buffer, int buffer_len);
+ line_t sip_config_get_line_by_called_number(line_t start_line, const char *called_number);
+ int sip_minimum_config_check(void);
+ void config_set_codec_table(int codec_mask);
+ int sip_config_get_keepalive_expires();
+ rtp_ptype sip_config_preferred_codec(void);
++uint32_t config_get_video_max_fs(const rtp_ptype codec);
++uint32_t config_get_video_max_fr(const rtp_ptype codec);
+ 
+ #endif /* PROT_CONFIGMGR_H_ */
+diff --git a/media/webrtc/signaling/src/sipcc/core/gsm/gsm_sdp.c b/media/webrtc/signaling/src/sipcc/core/gsm/gsm_sdp.c
+--- a/media/webrtc/signaling/src/sipcc/core/gsm/gsm_sdp.c
++++ b/media/webrtc/signaling/src/sipcc/core/gsm/gsm_sdp.c
+@@ -1174,17 +1174,19 @@ gsmsdp_set_video_media_attributes (uint3
+                                              RTPMAP_VIDEO_CLOCKRATE);
+             break;
+         case RTP_VP8:
+             (void) sdp_attr_set_rtpmap_encname(sdp_p, level, 0, a_inst,
+                                                SIPSDP_ATTR_ENCNAME_VP8);
+             (void) sdp_attr_set_rtpmap_clockrate(sdp_p, level, 0, a_inst,
+                                              RTPMAP_VIDEO_CLOCKRATE);
+ 
+-            /* TODO: Get max_fs & max_fr from device configuration (Bug 881935) */
++            max_fs = config_get_video_max_fs((rtp_ptype) media_type);
++            max_fr = config_get_video_max_fr((rtp_ptype) media_type);
++
+             if (max_fs || max_fr) {
+                 if (sdp_add_new_attr(sdp_p, level, 0, SDP_ATTR_FMTP, &a_inst)
+                     != SDP_SUCCESS) {
+                     GSM_ERR_MSG("Failed to add attribute");
+                     return;
+                 }
+ 
+                 (void) sdp_attr_set_fmtp_payload_type(sdp_p, level, 0, a_inst,
+@@ -2988,16 +2990,20 @@ gsmsdp_negotiate_codec (fsmdef_dcb_t *dc
+     int             codec = RTP_NONE;
+     int             remote_pt = RTP_NONE;
+     int32_t         payload_types_count = 0; /* count for allocating right amout
+                                                 of memory for media->payloads */
+     int             temp;
+     u16             a_inst;
+     vcm_payload_info_t *payload_info = NULL;
+     vcm_payload_info_t *previous_payload_info;
++    uint32          max_fs = 0;
++    uint32          max_fr = 0;
++    uint32          max_width = 0;
++    uint32          max_height = 0;
+ 
+     if (!dcb_p || !sdp_p || !media) {
+         return (RTP_NONE);
+     }
+ 
+     level = media_level;
+     attr_label = sdp_attr_get_simple_string(sdp_p->dest_sdp,
+                                             SDP_ATTR_LABEL, level, 0, 1);
+@@ -3387,33 +3393,78 @@ gsmsdp_negotiate_codec (fsmdef_dcb_t *dc
+                             != NULL ) {
+                         media->previous_sdp.profile_level =
+                             media->profile_level;
+                         sscanf(attr_label,"%x", &media->profile_level);
+                     }
+ 
+                     /* This should ultimately use RFC 6236 a=imageattr
+                        if present */
++
++                    /* Set video resolution */
++                    max_fs = 0;
++                    max_width = 0;
++                    max_height = 0;
++                    sdp_attr_get_fmtp_max_fs(sdp_p->dest_sdp, level, 0, 1,
++                                             &max_fs);
++//max_fs = 0;
++                    if (max_fs > 0) {
++                        for (i = 0; i < VIDEO_RESOLUTION_MAX; i++) {
++                            if ((video_resolution_table[i].width *
++                                video_resolution_table[i].height) >
++                                (max_fs * 256)) {
++                                break;
++                            }
++                        }
++                        if (i == 0) {
++                            GSM_DEBUG(DEB_L_C_F_PREFIX"codec=%d "
++                                "max-fs too small",
++                                DEB_L_C_F_PREFIX_ARGS(GSM, dcb_p->line,
++                                dcb_p->call_id, fname), codec);
++                            max_width = video_resolution_table[0].width;
++                            max_height = video_resolution_table[0].height;
++                        } else {
++                            max_width = video_resolution_table[i - 1].width;
++                            max_height = video_resolution_table[i - 1].height;
++                        }
++                    }
++                    payload_info->video.width = max_width;
++                    payload_info->video.height = max_height;
++
++                    /* Set maximum frame rate */
++                    max_fr = 0;
++                    sdp_attr_get_fmtp_max_fr(sdp_p->dest_sdp, level, 0, 1,
++                                             &max_fr);
++                    if (max_fr > 0) {
++                        payload_info->video.max_fr = max_fr;
++                    }
++printf_stderr("====== max_fs=%d max_fr=%d max_width=%d max_height=%d\n", max_fs, max_fr, max_width, max_height);
++/*
+                     switch (codec) {
+                         case RTP_VP8:
+-                            payload_info->video.width = 640;
+-                            payload_info->video.height = 480;
+-                        break;
++                            if(!max_width || !max_height) {
++                                payload_info->video.width = 640;
++                                payload_info->video.height = 480;
++                            }
++                            break;
+                         case RTP_I420:
+-                            payload_info->video.width = 176;
+-                            payload_info->video.height = 144;
+-                        break;
++                            if(!max_width || !max_height) {
++                                payload_info->video.width = 176;
++                                payload_info->video.height = 144;
++                            }
++                            break;
+                         default:
+                             GSM_DEBUG(DEB_L_C_F_PREFIX"codec=%d not setting "
+                                 "codec parameters (not implemented)\n",
+                                 DEB_L_C_F_PREFIX_ARGS(GSM, dcb_p->line,
+                                 dcb_p->call_id, fname), codec);
+                             payload_info->video.width = -1;
+                             payload_info->video.height = -1;
+                     }
++*/
+                 } /* end video */
+ 
+                 GSM_DEBUG(DEB_L_C_F_PREFIX"codec= %d",
+                       DEB_L_C_F_PREFIX_ARGS(GSM, dcb_p->line,
+                                             dcb_p->call_id, fname), codec);
+ 
+ 
+                 found_codec = TRUE;
+diff --git a/media/webrtc/signaling/src/sipcc/core/gsm/h/gsm_sdp.h b/media/webrtc/signaling/src/sipcc/core/gsm/h/gsm_sdp.h
+--- a/media/webrtc/signaling/src/sipcc/core/gsm/h/gsm_sdp.h
++++ b/media/webrtc/signaling/src/sipcc/core/gsm/h/gsm_sdp.h
+@@ -46,16 +46,46 @@ typedef enum constraints_ {
+ 
+ static const gsmsdp_key_table_entry_t constraints_table[] = {
+     {"OfferToReceiveAudio",         OfferToReceiveAudio},
+     {"OfferToReceiveVideo",         OfferToReceiveVideo},
+     {"VoiceActivityDetection",      VoiceActivityDetection},
+     {"MozDontOfferDataChannel",     MozDontOfferDataChannel}
+ };
+ 
++typedef enum video_resolutions_ {
++    VIDEO_RESOLUTION_SQCIF  = 0,
++    VIDEO_RESOLUTION_QQVGA,
++    VIDEO_RESOLUTION_QCIF,
++    VIDEO_RESOLUTION_CGA,
++    VIDEO_RESOLUTION_QVGA,
++    VIDEO_RESOLUTION_SIF,
++    VIDEO_RESOLUTION_WQVGA,
++    VIDEO_RESOLUTION_CIF,
++    VIDEO_RESOLUTION_VGA,
++    VIDEO_RESOLUTION_MAX
++} video_resolutions;
++
++typedef struct {
++    uint32 width;
++    uint32 height;
++} video_resolution_table_t;
++
++static const video_resolution_table_t video_resolution_table[] = {
++    {128, 96},     // SQCIF    128 * 96    = 12288
++    {160, 120},    // QQVGA    160 * 120   = 19200
++    {176, 144},    // QCIF     176 * 144   = 25344
++    {320, 200},    // CGA      320 * 200   = 64000
++    {320, 240},    // QVGA     320 * 240   = 76800
++    {352, 240},    // SIF      352 * 240   = 84480
++    {400, 240},    // WQVGA    400 * 240   = 96000
++    {352, 288},    // CIF      352 * 288   = 101376
++    {640, 480}     // VGA      648 * 480   = 307200
++};
++
+ cc_causes_t gsmsdp_create_local_sdp(fsmdef_dcb_t *dcb_p, boolean force_streams_enabled,
+                                     boolean audio, boolean video, boolean data, boolean offer);
+ void gsmsdp_create_options_sdp(cc_sdp_t **sdp_pp);
+ void gsmsdp_reset_local_sdp_media(fsmdef_dcb_t *dcb, fsmdef_media_t *media,
+                                   boolean hold);
+ void gsmsdp_set_local_sdp_direction(fsmdef_dcb_t *dcb_p, fsmdef_media_t *media,
+                                     sdp_direction_e direction);
+ void gsmsdp_set_local_hold_sdp(fsmdef_dcb_t *dcb, fsmdef_media_t *media);
+diff --git a/media/webrtc/signaling/src/sipcc/include/vcm.h b/media/webrtc/signaling/src/sipcc/include/vcm.h
+--- a/media/webrtc/signaling/src/sipcc/include/vcm.h
++++ b/media/webrtc/signaling/src/sipcc/include/vcm.h
+@@ -180,16 +180,17 @@ typedef struct
+       int channels;
+       int bitrate;     /* Wire bitrate of RTP packet payloads */
+     } audio;
+ 
+     struct
+     {
+       int width;
+       int height;
++      int max_fr; /* Max frame rate */
+     } video;
+   };
+ 
+   /* Codec-specific parameters */
+   union
+   {
+     struct {
+         uint16_t mode;
+@@ -1028,16 +1029,20 @@ int vcmGetILBCMode();
+  * vcmOnSdpParseError
+  *
+  * This method is called for each parsing error of SDP.  It does not necessarily
+  * mean the SDP read was fatal and can be called many times for the same SDP.
+  *
+  */
+ int vcmOnSdpParseError(const char *peercconnection, const char *message);
+ 
++short vcmGetVideoMaxFs(uint16_t codec, int32_t *max_fs);
++
++short vcmGetVideoMaxFr(uint16_t codec, int32_t *max_fs);
++
+ //Using C++ for gips. This is the end of extern "C" above.
+ #ifdef __cplusplus
+ }
+ #endif
+ 
+ 
+ 
+ 
+diff --git a/modules/libpref/src/init/all.js b/modules/libpref/src/init/all.js
+--- a/modules/libpref/src/init/all.js
++++ b/modules/libpref/src/init/all.js
+@@ -191,16 +191,23 @@ pref("media.dash.enabled", false);
+ pref("media.gstreamer.enabled", false);
+ #endif
+ #ifdef MOZ_WEBRTC
+ pref("media.navigator.enabled", true);
+ pref("media.navigator.video.default_width",640);
+ pref("media.navigator.video.default_height",480);
+ pref("media.navigator.video.default_fps",30);
+ pref("media.navigator.video.default_minfps",10);
++#ifdef MOZ_WIDGET_GONK
++pref("media.navigator.video.max_fs", 99); // max-fs 99 for QCIF(176*144)
++pref("media.navigator.video.max_fr", 30);
++#else
++pref("media.navigator.video.max_fs", 1200); // max-fs 1200 for VGA(640*480)
++pref("media.navigator.video.max_fr", 30);
++#endif
+ pref("media.peerconnection.enabled", true);
+ pref("media.navigator.permission.disabled", false);
+ pref("media.peerconnection.default_iceservers", "[{\"url\": \"stun:23.21.150.121\"}]");
+ pref("media.peerconnection.use_document_iceservers", true);
+ // These values (aec, agc, and noice) are from media/webrtc/trunk/webrtc/common_types.h
+ // kXxxUnchanged = 0, kXxxDefault = 1, and higher values are specific to each 
+ // setting (for Xxx = Ec, Agc, or Ns).  Defaults are all set to kXxxDefault here.
+ pref("media.peerconnection.turn.disable", false);
