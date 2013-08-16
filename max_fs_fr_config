@@ -64,7 +64,7 @@ diff --git a/media/webrtc/signaling/src/media-conduit/VideoConduit.cpp b/media/w
    return kMediaConduitNoError;
  }
  
-@@ -542,16 +545,30 @@ WebrtcVideoConduit::ConfigureRecvMediaCo
+@@ -542,26 +545,40 @@ WebrtcVideoConduit::ConfigureRecvMediaCo
  // XXX we need to figure out how to feed back changes in preferred capture
  // resolution to the getUserMedia source
  bool
@@ -73,18 +73,16 @@ diff --git a/media/webrtc/signaling/src/media-conduit/VideoConduit.cpp b/media/w
  {
    // XXX This will do bandwidth-resolution adaptation as well - bug 877954
  
-+printf_stderr("SelectSendResolution() %d %d %d %d\n", width, height, mSendingWidth, mSendingHeight);
-+  // Don't change resolution if width and height are defined in the original
-+  // codec configuration.
-+  if (mCurSendCodecConfig &&
-+      mCurSendCodecConfig->mWidth > 0 &&
-+      mCurSendCodecConfig->mHeight > 0 &&
-+      (mCurSendCodecConfig->mWidth * mCurSendCodecConfig->mHeight <
-+       width * height))
++  // Choose lower one from configured resolution and capture resolution
++  if (mCurSendCodecConfig)
 +  {
-+printf_stderr("SelectSendResolution() don't change resolution %d %d\n", 
-+   mCurSendCodecConfig->mWidth, mCurSendCodecConfig->mHeight);
-+    return true;
++    unsigned int res;
++
++    res = mCurSendCodecConfig->mWidth * mCurSendCodecConfig->mHeight;
++    if (res > 0 && res < width * height) {
++      width = mCurSendCodecConfig->mWidth;
++      height = mCurSendCodecConfig->mHeight;
++    }
 +  }
 +
    // Adapt to getUserMedia resolution changes
@@ -95,6 +93,18 @@ diff --git a/media/webrtc/signaling/src/media-conduit/VideoConduit.cpp b/media/w
      // If the resolution changes, we'll try again.  In the meantime, we'll
      // keep using the old size in the encoder.
      mSendingWidth = width;
+     mSendingHeight = height;
+ 
++printf_stderr("SelectSendResolution() change resolution %d %d\n", width, height);
++
+     // Get current vie codec.
+     webrtc::VideoCodec vie_codec;
+     WebRtc_Word32 err;
+ 
+     if ((err = mPtrViECodec->GetSendCodec(mChannel, vie_codec)) != 0)
+     {
+       CSFLogError(logTag, "%s: GetSendCodec failed, err %d", __FUNCTION__, err);
+       return false;
 @@ -589,16 +606,18 @@ MediaConduitErrorCode
  WebrtcVideoConduit::SendVideoFrame(unsigned char* video_frame,
                                     unsigned int video_frame_length,
